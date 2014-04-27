@@ -1,0 +1,14 @@
+[Unit]
+Description=oVirt Node early configuration service
+After=rhel-readonly.service fedora-readonly.service local-fs.target network.target
+Wants=rhel-readonly.service fedora-readonly.service local-fs.target
+Before=sshd.service rsyslog.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/ovirt-init-functions.sh start_ovirt_early
+ExecStop=/usr/libexec/ovirt-init-functions.sh stop_ovirt_early
+
+[Install]
+WantedBy=multi-user.target

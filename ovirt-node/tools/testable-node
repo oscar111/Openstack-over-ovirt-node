@@ -1,0 +1,175 @@
+#!/bin/bash
+#
+# testable-node Copyright (C) 2013 Red Hat, Inc.
+# Written by Fabian Deutsch <fabiand@fedoraproject.org>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+# MA  02110-1301, USA.  A copy of the GNU General Public License is
+# also available at http://www.gnu.org/copyleft/gpl.html.
+
+isoname=""
+verbose=""
+reponame=""
+dry=false
+testplanname=""
+igorurl=""
+
+PLUGINPREFIX=ovirt-node-plugin-
+IGORPLUGIN=ovirt-node-plugin-igor-slave
+
+
+show_usage()
+{
+    echo ""
+    echo "Usage: $0 [-vdt] [-r <.repo-file>] [-a <url>] -i <isoname>"
+    echo " -i    ISO file to be edited"
+    echo " -v    Be verbose"
+    echo " -r    Additional .repo file (path or URL to a .repo file)"
+    echo " -d    Dry - don't execute edit-node"
+    echo " -t    Igor testplan to run on edited iso (if igorc is available)"
+    echo " -a    With -t: URL of the igor host"
+    echo "       (e.g. http://192.168.122.1:8080)"
+    echo ""
+    echo "$0 adds the $IGORPLUGIN to an ISO so it can be tested with Igor."
+    echo "$0 needs to be run as root."
+    echo ""
+    echo "Example:"
+    echo "$0 -v -i ovirt-node-iso-3.0.0-5.0.1.fc18.iso \\"
+    echo "   -r http://resources.ovirt.org/releases/node-base/edit-node.repo"
+    echo ""
+}
+
+die()
+{
+    echo -e "\nERROR: $@\n" >&2
+    show_usage
+    exit 1
+}
+
+log()
+{
+    echo -e "$(date +"%F %T") $@"
+}
+
+_parse_opts()
+{
+    log "Parsing args: $@"
+    while getopts "h?vdi:r:t:a:" opt;
+    do
+        case "$opt" in
+        h|\?)
+            show_usage
+            exit 0
+            ;;
+        v)  verbose="-v -d"
+            ;;
+        i)  isoname=$OPTARG
+            ;;
+        r)  reponame=$OPTARG
+            ;;
+        d)  dry=true
+            ;;
+        t)  testplanname=$OPTARG
+            ;;
+        a)  igorurl=$OPTARG
+            ;;
+        esac
+    done
+
+    [[ -e "$isoname" ]] || die "<isoname> ('$isoname') is missing or does not exist"
+    [[ "$testplanname" && -z "$igorurl" ]] && die "Igor URL is missing"
+
+    shift $((OPTIND-1))
+
+    [[ "$1" = "--" ]] && shift
+}
+
+main()
+{
+    TMPREPO=$(mktemp -t --suffix .repo igor-repo-XXXX)
+
+    _parse_opts "$@"
+
+    check_os_compatibility
+
+    if [[ -n $reponame ]];
+    then
+        log "Generating temporary repository file: $TMPREPO"
+        create_repofile
+    fi
+
+    ARGS="$verbose "
+    [[ -n $reponame ]] && ARGS+="--repo $TMPREPO "
+    ARGS+="--install $IGORPLUGIN "
+    ARGS+="--nogpgcheck "
+    ARGS+="$isoname"
+
+    log "Launching edit-node $ARGS"
+    log "Dry: $dry"
+    $dry || ./edit-node $ARGS
+
+    # Shall igorc be called?
+    [[ "$testplanname" ]] && test_with_igor
+
+    # Keep temporary repo when in verbose mode
+    [[ "$verbose" ]] || unlink $TMPREPO
+
+    log "Done"
+}
+
+check_os_compatibility()
+{
+    [[ -e /etc/os-release ]] || die "No OS informations available"
+    . /etc/os-release
+    log "OS Release: $VERSION_ID"
+    ISORELEASE=$(echo $isoname | egrep -o "(fc|el)[0-9]+" | sed "s/fc\|el//")
+    log "ISO Release: $ISORELEASE"
+    [[ -z "$ISORELEASE" ]] && die "Failed to parse ISO release"
+    [[ $ISORELEASE -eq $VERSION_ID ]] || die "OS and ISO don't match."
+}
+
+create_repofile()
+{
+    if echo $reponame | egrep -q "http://.*\.repo";
+    then
+        log "Given repo is a URL, fetching from '$reponame' ..."
+        curl -# -O "$reponame"
+        reponame=$(basename $reponame)
+        log "Got '$reponame'"
+    fi
+    [[ ! -f $reponame ]] && die "Can't find repofile '$reponame'."
+    # FIXME once we ship cerst again we can also use https
+    cmds="s/^\[/\[igor-/ ; /^mirrorlist/d ; s/^#base/base/ ; s/https:/http:/"
+    sed -e "$cmds" $reponame > $TMPREPO
+}
+
+test_with_igor()
+{
+    log "Running igor test on iso"
+    [[ -z "$(which igorc)" ]] && die "igorc is missing"
+
+    MAGICWORD=${IGORPLUGIN#$PLUGINPREFIX}
+    isoname_testable=$(ls -1 $(dirname $isoname) | grep $MAGICWORD | tail -n1)
+    isoname_testable=$(dirname $isoname)/$isoname_testable
+    log "Using testable ISO: $isoname_testable"
+
+    [[ -e "$isoname_testable" ]] || die "No testable ISO found."
+
+    igorc_cmdline="testplan_on_iso ${testplanname} ${isoname_testable} "
+    igorc_cmdline+="'local_boot_trigger=${igorurl}/testjob/{igor_cookie}'"
+    log "About to run igorc $igorc_cmdline"
+    $dry || igorc "$igorc_cmdline"
+}
+
+main "$@"
